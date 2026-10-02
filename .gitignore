@@ -1,0 +1,5 @@
+.env
+*.orig
+__pycache__/
+run.log
+reports/

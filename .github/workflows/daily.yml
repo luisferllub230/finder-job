@@ -1,0 +1,50 @@
+name: daily-job-hunt
+
+on:
+  schedule:
+    - cron: "45 11 * * *"   # 07:45 República Dominicana (UTC-4)
+  workflow_dispatch:         # botón "Run workflow" para correrlo a mano
+
+permissions:
+  contents: write            # para guardar jobs.db (vacantes ya vistas)
+
+concurrency:
+  group: daily-job-hunt
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Buscar vacantes y enviar email
+        env:
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: "587"
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          REPORT_TO: alejandroferllub@gmail.com
+        run: python3 job_hunter.py
+
+      - name: Guardar vacantes vistas
+        if: always()
+        run: |
+          git config user.name "job-hunter-bot"
+          git config user.email "job-hunter-bot@users.noreply.github.com"
+          git add jobs.db
+          git diff --cached --quiet || git commit -m "chore: update seen jobs $(date -u +%F)"
+          git push
+
+      - name: Subir reporte HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
