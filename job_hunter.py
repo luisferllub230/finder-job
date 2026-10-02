@@ -18,10 +18,14 @@ import re
 import smtplib
 import sqlite3
 import sys
+import time
 import urllib.parse
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from functools import partial
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -32,11 +36,36 @@ UA = "Mozilla/5.0 (job_hunter personal script)"
 
 
 # ----------------------------------------------------------------- utilidades
-def fetch(url, as_json=True):
+def fetch(url, as_json=True, retries=2):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
-    with urllib.request.urlopen(req, timeout=40) as r:
-        raw = r.read().decode("utf-8", errors="replace")
-    return json.loads(raw) if as_json else raw
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=40) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if as_json else raw
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or attempt == retries:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == retries:
+                raise
+        time.sleep(3 * (attempt + 1))
+
+
+def num(value):
+    """Número o None, aunque la API lo mande como texto."""
+    try:
+        return float(str(value).replace(",", "")) if value not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def date_from_ts(value, ms=False):
+    """Fecha desde timestamp Unix (o texto ISO); '' si no se puede leer."""
+    n = num(value)
+    if n is None:
+        return str(value or "")[:10]
+    return datetime.fromtimestamp(n / 1000 if ms else n, timezone.utc).date()
 
 
 def fix_mojibake(text):
@@ -92,7 +121,7 @@ def parse_salary(text, strict=False):
 def job(source, jid, title, company, url, location="", salary_min=None,
         salary_text="", tags=None, description="", date=""):
     return {
-        "id": f"{source}:{jid}", "source": source, "title": clean(title),
+        "id": f"{source}:{jid or url or title}", "source": source, "title": clean(title),
         "company": clean(company), "url": url, "location": clean(location),
         "salary_min": salary_min, "salary_text": clean(salary_text),
         "tags": [str(t).lower() for t in (tags or [])],
@@ -126,21 +155,29 @@ def src_remoteok():
     return out
 
 
+def _himalayas_job(j):
+    locs = j.get("locationRestrictions") or []
+    loc = ", ".join(l if isinstance(l, str) else l.get("name", "") for l in locs) or "Worldwide"
+    smin = num(j.get("minSalary"))
+    stxt = f"{j.get('currency', 'USD')} {smin:,.0f}–{num(j.get('maxSalary')) or 0:,.0f}/yr" if smin else ""
+    return job("himalayas", j.get("guid") or j.get("applicationLink"),
+               j.get("title"), j.get("companyName"),
+               j.get("applicationLink") or j.get("guid"), loc, smin, stxt,
+               j.get("categories"), j.get("description") or j.get("excerpt"),
+               j.get("pubDate"))
+
+
 def src_himalayas():
     out = []
     for offset in (0, 100, 200):
         data = fetch(f"https://himalayas.app/jobs/api?limit=100&offset={offset}")
-        for j in data.get("jobs", []):
-            locs = j.get("locationRestrictions") or []
-            loc = ", ".join(l if isinstance(l, str) else l.get("name", "") for l in locs) or "Worldwide"
-            smin = j.get("minSalary")
-            stxt = f"{j.get('currency', 'USD')} {smin:,}–{j.get('maxSalary') or 0:,}/yr" if smin else ""
-            out.append(job("himalayas", j.get("guid") or j.get("applicationLink"),
-                           j.get("title"), j.get("companyName"),
-                           j.get("applicationLink") or j.get("guid"), loc, smin, stxt,
-                           j.get("categories"), j.get("description") or j.get("excerpt"),
-                           j.get("pubDate")))
+        out += [_himalayas_job(j) for j in data.get("jobs", [])]
     return out
+
+
+def src_himalayas_search(term):
+    q = urllib.parse.quote(term)
+    return [_himalayas_job(j) for j in fetch(f"https://himalayas.app/jobs/api/search?q={q}").get("jobs", [])]
 
 
 def src_jobicy():
@@ -165,7 +202,7 @@ def src_arbeitnow():
                 continue
             out.append(job("arbeitnow", j.get("slug"), j.get("title"), j.get("company_name"),
                            j.get("url"), j.get("location"), None, "", j.get("tags"),
-                           j.get("description"), datetime.fromtimestamp(j.get("created_at", 0)).date()))
+                           j.get("description"), date_from_ts(j.get("created_at"))))
     return out
 
 
@@ -205,8 +242,145 @@ def src_hn_whoshiring():
     return out
 
 
-SOURCES = [src_remotive, src_remoteok, src_himalayas, src_jobicy, src_arbeitnow,
-           src_weworkremotely, src_hn_whoshiring]
+def src_getonbrd(term):
+    """Get on Board: portal LatAm. Solo remoto; min_salary viene en USD/mes."""
+    out = []
+    q = urllib.parse.quote(term)
+    for page in (1, 2, 3):
+        data = fetch(f"https://www.getonbrd.com/api/v0/search/jobs?query={q}&per_page=100"
+                     f"&page={page}&expand=%5B%22company%22%5D")
+        for d in data.get("data", []):
+            a = d.get("attributes", {})
+            modality = a.get("remote_modality") or ""
+            if "remote" not in modality:
+                continue
+            countries = [c for c in (a.get("countries") or []) if c and c.lower() != "remote"]
+            loc = ", ".join(countries) if countries else "LatAm remote"
+            smin = num(a.get("min_salary"))
+            stxt = f"USD {smin:,.0f}–{num(a.get('max_salary')) or 0:,.0f}/mes" if smin else ""
+            company = ((a.get("company") or {}).get("data") or {}).get("attributes", {}).get("name", "")
+            out.append(job("getonbrd", d.get("id"), a.get("title"), company,
+                           (d.get("links") or {}).get("public_url"), loc,
+                           smin * 12 if smin else None, stxt, [],
+                           " ".join(str(a.get(k) or "") for k in ("description", "functions", "desirable")),
+                           date_from_ts(a.get("published_at"))))
+        if page >= (data.get("meta") or {}).get("total_pages", 1):
+            break
+    return out
+
+
+def src_workingnomads():
+    out = []
+    for j in fetch("https://www.workingnomads.com/api/exposed_jobs/"):
+        if j.get("category_name") != "Development":
+            continue
+        out.append(job("workingnomads", j.get("url"), j.get("title"), j.get("company_name"),
+                       j.get("url"), j.get("location"), None, "",
+                       (j.get("tags") or "").split(","), j.get("description"), j.get("pub_date")))
+    return out
+
+
+def src_4dayweek():
+    out = []
+    for page in (1, 2, 3, 4):
+        for j in fetch(f"https://4dayweek.io/api/jobs?page={page}").get("jobs", []):
+            if j.get("work_arrangement") != "remote" or j.get("category") != "engineering":
+                continue
+            countries = sorted({l.get("country") for l in j.get("locations") or [] if l.get("country")})
+            company = j["company"].get("name") if isinstance(j.get("company"), dict) else j.get("company_name")
+            stxt = j.get("salary") or ""
+            out.append(job("4dayweek", j.get("id"), j.get("title"), company,
+                           f"https://4dayweek.io/job/{j.get('slug')}",
+                           ", ".join(countries) or "Worldwide", None, stxt,
+                           j.get("stack") or [], "", j.get("inserted")))
+    return out
+
+
+def src_remotefirstjobs():
+    root = ET.fromstring(fetch("https://remotefirstjobs.com/rss/jobs.rss", as_json=False))
+    return [job("remotefirstjobs", it.findtext("guid") or it.findtext("link"), it.findtext("title"),
+                (it.findtext("link") or "").split("/companies/")[-1].split("/")[0].replace("-", " ").title(),
+                it.findtext("link"), "", None, "", [], it.findtext("description"), it.findtext("pubDate"))
+            for it in root.iter("item")]
+
+
+def src_pythonorg():
+    """Bolsa oficial de python.org. La 1ª línea de la descripción es la ubicación."""
+    out = []
+    root = ET.fromstring(fetch("https://www.python.org/jobs/feed/rss/", as_json=False))
+    for it in root.iter("item"):
+        desc = it.findtext("description") or ""
+        loc = desc.split("\n", 1)[0]
+        if not re.search(r"remote|telecommut|anywhere", loc, re.I):
+            continue
+        title, _, company = (it.findtext("title") or "").rpartition(", ")
+        out.append(job("python.org", it.findtext("guid"), title or company, company if title else "",
+                       it.findtext("link"), loc, None, "", ["python"], desc, it.findtext("pubDate")))
+    return out
+
+
+def src_greenhouse(board):
+    out = []
+    for j in fetch(f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true").get("jobs", []):
+        loc = (j.get("location") or {}).get("name") or ""
+        if not re.search(r"remote|anywhere|worldwide", loc, re.I):
+            continue
+        out.append(job("greenhouse", j.get("id"), j.get("title"), j.get("company_name") or board,
+                       j.get("absolute_url"), loc, None, "", [],
+                       html.unescape(j.get("content") or ""), j.get("first_published") or j.get("updated_at")))
+    return out
+
+
+def src_lever(company):
+    out = []
+    for j in fetch(f"https://api.lever.co/v0/postings/{company}?mode=json"):
+        cat = j.get("categories") or {}
+        loc = ", ".join(cat.get("allLocations") or [cat.get("location") or ""])
+        if j.get("workplaceType") != "remote" and "remote" not in loc.lower():
+            continue
+        sr = j.get("salaryRange") or {}
+        smin, stxt = None, ""
+        if num(sr.get("min")):
+            stxt = f"{sr.get('currency', '')} {num(sr['min']):,.0f}–{num(sr.get('max')) or 0:,.0f} {sr.get('interval', '')}"
+            smin = parse_salary(stxt.replace("per-hour", "/hour").replace("per-month", "/month"))
+        out.append(job("lever", j.get("id"), j.get("text"), company.title(), j.get("hostedUrl"),
+                       loc, smin, stxt, [cat.get("team") or ""],
+                       (j.get("descriptionPlain") or "") + " " + (j.get("additionalPlain") or ""),
+                       date_from_ts(j.get("createdAt"), ms=True)))
+    return out
+
+
+def src_ashby(org):
+    out = []
+    data = fetch(f"https://api.ashbyhq.com/posting-api/job-board/{org}?includeCompensation=true")
+    for j in data.get("jobs", []):
+        if not (j.get("isRemote") or j.get("workplaceType") == "Remote"):
+            continue
+        locs = [j.get("location") or ""] + [l.get("location", "") for l in j.get("secondaryLocations") or []]
+        stxt = ((j.get("compensation") or {}).get("compensationTierSummary") or "")
+        out.append(job("ashby", j.get("id"), j.get("title"), org.title(), j.get("jobUrl"),
+                       ", ".join(l for l in locs if l), None, stxt, [j.get("team") or ""],
+                       j.get("descriptionPlain"), j.get("publishedAt")))
+    return out
+
+
+def build_sources():
+    """Lista de (nombre, función). Términos y empresas salen de config.json."""
+    srcs = [(f.__name__, f) for f in (src_remotive, src_remoteok, src_himalayas, src_jobicy,
+                                      src_arbeitnow, src_weworkremotely, src_hn_whoshiring,
+                                      src_workingnomads, src_4dayweek, src_remotefirstjobs,
+                                      src_pythonorg)]
+    for term in CFG.get("search_terms", []):
+        srcs.append((f"himalayas:{term}", partial(src_himalayas_search, term)))
+        srcs.append((f"getonbrd:{term}", partial(src_getonbrd, term)))
+    ats = {"greenhouse": src_greenhouse, "lever": src_lever, "ashby": src_ashby}
+    for kind, fn in ats.items():
+        for company in CFG.get("companies", {}).get(kind, []):
+            srcs.append((f"{kind}:{company}", partial(fn, company)))
+    return srcs
+
+
+SOURCES = build_sources()
 
 
 # ------------------------------------------------------------ filtro y score
@@ -231,8 +405,13 @@ def evaluate(j):
         pass
     elif any(has_word(loc, b) for b in CFG["location_blocked"]):
         return None
-    elif CFG.get("strict_location") and j["source"] != "hn" and loc not in CFG.get("location_generic", []):
-        return None  # ciudad/país concreto (Cincinnati, Brazil, Sweden...)
+    elif (CFG.get("strict_location") and j["source"] != "hn"
+          and loc not in CFG.get("location_generic", [])):
+        # Excepción: tu nicho (Odoo) en un país LatAm — a veces aceptan toda la región
+        niche = any(has_word(title, k) for k in CFG.get("niche_keywords", []))
+        if not (niche and any(has_word(loc, c) for c in CFG.get("latam_countries", []))):
+            return None  # ciudad/país concreto (Cincinnati, Brazil, Sweden...)
+        flags.append(f"solo {j['location'][:40]}? confirma si aceptan RD")
     else:
         flags.append(f"verificar ubicación: {j['location'][:60]}")
 
@@ -347,15 +526,22 @@ def main():
     db.execute("""CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, first_seen TEXT,
                   title TEXT, company TEXT, url TEXT, score INT, status TEXT DEFAULT 'new')""")
 
-    jobs, errors = [], []
-    for src in SOURCES:
+    def run(src):
+        name, fn = src
         try:
-            got = src()
-            jobs += got
-            print(f"[ok] {src.__name__}: {len(got)}")
+            return name, fn(), None
         except Exception as e:  # una fuente caída no detiene las demás
-            errors.append(f"{src.__name__}: {e}")
-            print(f"[error] {src.__name__}: {e}")
+            return name, [], e
+
+    jobs, errors = [], []
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        for name, got, err in pool.map(run, SOURCES):
+            if err:
+                errors.append(f"{name}: {err}")
+                print(f"[error] {name}: {err}")
+            else:
+                jobs += got
+                print(f"[ok] {name}: {len(got)}")
 
     seen_urls, rows = set(), []
     for j in jobs:
@@ -367,13 +553,10 @@ def main():
         if not res:
             continue
         is_new = db.execute("SELECT 1 FROM jobs WHERE id=?", (j["id"],)).fetchone() is None
-        if is_new:
-            db.execute("INSERT INTO jobs(id,first_seen,title,company,url,score) VALUES(?,?,?,?,?,?)",
-                       (j["id"], datetime.now().isoformat(), j["title"], j["company"], j["url"], res[0]))
         if is_new or show_all:
             rows.append((j, res[0], res[1]))
-    db.commit()
 
+    # Solo se marcan como vistas las que entran al reporte; el resto sale otro día
     rows.sort(key=lambda r: -r[1])
     rows = rows[: CFG["max_results"]]
     report = build_report(rows, errors)
@@ -394,6 +577,11 @@ def main():
         except Exception as e:
             print(f"[error] email: {e}")
             failed = True
+    if not failed:  # si el email falló, mañana se reintentan las mismas
+        db.executemany("INSERT OR IGNORE INTO jobs(id,first_seen,title,company,url,score) VALUES(?,?,?,?,?,?)",
+                       [(j["id"], datetime.now().isoformat(), j["title"], j["company"], j["url"], sc)
+                        for j, sc, _ in rows])
+        db.commit()
     if failed:  # exit != 0 → GitHub Actions avisa del fallo por correo
         sys.exit(1)
 

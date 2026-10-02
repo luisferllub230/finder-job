@@ -1,6 +1,14 @@
 # job_hunter
 
-Busca todos los días empleos remotos en Remotive, RemoteOK, Himalayas, Jobicy, Arbeitnow, We Work Remotely y "Who is hiring" de Hacker News. Descarta los que solo aceptan USA/Europa, los de menos de $12k/año y los que no encajan con tu perfil. Genera `reports/jobs_FECHA.html` con **solo vacantes nuevas**, ordenadas por puntaje y con un mensaje de presentación listo para copiar.
+Busca todos los días empleos remotos en ~70 fuentes y te manda por email **solo las vacantes nuevas**, ordenadas por puntaje y con un mensaje de presentación listo para copiar. Descarta las que solo aceptan USA/Europa, pagan menos de $12k/año o no encajan con tu perfil.
+
+## Fuentes
+- **Portales remotos:** Remotive, RemoteOK, Himalayas (+ búsqueda por término), Jobicy, Arbeitnow, We Work Remotely, Working Nomads, 4 Day Week, Remote First Jobs.
+- **LatAm:** Get on Board (búsqueda por término, solo remoto).
+- **Comunidad:** Hacker News "Who is hiring", bolsa de python.org.
+- **Páginas de empleo de empresas** (Greenhouse, Lever, Ashby): GitLab, Canonical, Mozilla, Supabase, Stripe, Toptal, Wizeline, etc. La lista está en `config.json → companies`; para agregar una empresa, añade el identificador que aparece en su URL de empleos (`boards.greenhouse.io/<id>`, `jobs.lever.co/<id>`, `jobs.ashbyhq.com/<id>`).
+
+LinkedIn, Indeed y Glassdoor no se incluyen: no tienen API pública y prohíben el scraping.
 
 ## Instalación (WSL / Linux / macOS)
 ```bash
@@ -33,6 +41,8 @@ Luego `. ./.env && python3 job_hunter.py`. Ojo: en local se crea otro `jobs.db` 
 - `location_ok` / `location_blocked`: qué ubicaciones aceptar o descartar.
 - `strict_location`: si es `true`, descarta ubicaciones concretas (ciudad/país) que no estén en `location_ok`. `location_generic` ("remote", etc.) se mantiene con aviso "verificar".
 - `exclude_title`: roles a ignorar.
+- `search_terms`: términos que se buscan en Himalayas y Get on Board.
+- `niche_keywords` / `latam_countries`: vacantes de tu nicho (Odoo) en un país LatAm se muestran con aviso aunque `strict_location` esté activo.
 - `pitch`: tu mensaje base; `{company}` y `{title}` se rellenan solos.
 
 `python3 job_hunter.py --all` vuelve a mostrar también las ya vistas.

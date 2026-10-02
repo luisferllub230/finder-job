@@ -1,9 +1,28 @@
 {
   "min_annual_usd": 12000,
   "min_score": 5,
-  "max_results": 60,
+  "max_results": 100,
   "max_years_required": 6,
   "strict_location": true,
+
+  "niche_keywords": ["odoo"],
+  "latam_countries": ["mexico", "colombia", "panama", "venezuela", "peru", "chile", "argentina",
+                      "ecuador", "uruguay", "paraguay", "bolivia", "costa rica", "guatemala",
+                      "honduras", "el salvador", "nicaragua", "puerto rico", "dominican republic"],
+
+  "search_terms": ["odoo", "python", "django", "backend"],
+
+  "companies": {
+    "greenhouse": ["gitlab", "canonical", "wikimedia", "mozilla", "elastic", "grafanalabs",
+                   "vercel", "automatticcareers", "wizeline", "contentful", "circleci",
+                   "launchdarkly", "twilio", "cloudflare", "datadog", "mongodb", "okta",
+                   "reddit", "discord", "dropbox", "pagerduty", "fastly", "netlify",
+                   "gusto", "stripe", "airtable"],
+    "lever": ["toptal", "kavak", "binance", "spotify", "palantir"],
+    "ashby": ["posthog", "supabase", "linear", "zapier", "ramp", "replit", "airbyte", "n8n",
+              "resend", "sentry", "notion", "oyster", "multiverse", "ashby", "clipboard",
+              "omnea", "railway", "modal", "temporal", "prefect", "astronomer", "clickup"]
+  },
   "location_generic": ["remote", "remote job", "fully remote", "100% remote"],
 
   "require_any": ["python", "odoo", "django", "fastapi", "flask", "backend", "back-end",
