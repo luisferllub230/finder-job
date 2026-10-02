@@ -9,28 +9,23 @@ python3 job_hunter.py --no-email           # primera corrida de prueba
 ```
 No necesita `pip install`.
 
-## Email diario (opcional, Gmail)
-1. Crea una "contraseña de aplicación" en tu cuenta de Google (requiere 2FA).
-2. Crea `~/repos/finder-job/.env` y protégelo con `chmod 600 .env`:
+## Cómo corre (GitHub Actions, 24/7, gratis)
+Repo privado `luisferllub230/finder-job`. El workflow `.github/workflows/daily.yml` corre todos los días a las 07:45 (hora RD), envía el reporte a alejandroferllub@gmail.com y guarda `jobs.db` en el repo para no repetir vacantes. No depende de que tu PC esté encendida.
+
+- Correr a mano: `gh workflow run daily-job-hunt` o pestaña **Actions → Run workflow**.
+- Ver ejecuciones: `gh run list`.
+- Secrets necesarios: `SMTP_USER` (tu Gmail) y `SMTP_PASS` (contraseña de aplicación de Google: myaccount.google.com/apppasswords, requiere 2FA).
+- Si una corrida falla, GitHub te avisa por correo.
+
+## Correr en local (opcional)
+Crea `.env` (con `chmod 600 .env`):
 ```bash
 export SMTP_HOST=smtp.gmail.com
 export SMTP_PORT=587
 export SMTP_USER=alejandroferllub@gmail.com
 export SMTP_PASS=xxxx_xxxx_xxxx_xxxx
 ```
-
-## Programarlo todos los días
-**Opción A — Windows Task Scheduler (recomendado si usas WSL, porque cron en WSL no corre si WSL está cerrado):**
-Acción → Programa: `wsl.exe`, Argumentos:
-```
--e bash -lc "cd ~/repos/finder-job && { [ -f .env ] && . ./.env; }; python3 job_hunter.py >> run.log 2>&1"
-```
-Disparador: diario 7:45 AM.
-
-**Opción B — cron (Linux/macOS o WSL con `sudo service cron start`):**
-```
-45 7 * * * cd ~/repos/finder-job && { [ -f .env ] && . ./.env; }; /usr/bin/python3 job_hunter.py >> run.log 2>&1
-```
+Luego `. ./.env && python3 job_hunter.py`. Ojo: en local se crea otro `jobs.db` distinto al del repo.
 
 ## Ajustes (config.json)
 - `min_annual_usd`: piso salarial (12000 = $1,000/mes).
